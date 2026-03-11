@@ -1,0 +1,8 @@
+name: OfferingOfTheDeep
+version: '1.0-SNAPSHOT'
+main: player.offeringOfTheDeep.OfferingOfTheDeep
+api-version: '1.21'
+commands:
+  givepedestal:
+    description: Выдать Пьедестал Глубин
+    permission: pedestal.admin
