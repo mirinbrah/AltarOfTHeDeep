@@ -3,24 +3,23 @@ package player.offeringOfTheDeep;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
-import org.bukkit.Location;
-import org.bukkit.Material;
-import org.bukkit.NamespacedKey;
-import org.bukkit.Sound;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
-import org.bukkit.entity.Entity;
-import org.bukkit.entity.EntityType;
-import org.bukkit.entity.Player;
-import org.bukkit.entity.TextDisplay;
+import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.*;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataAdapterContext;
@@ -28,52 +27,75 @@ import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Transformation;
 import org.jetbrains.annotations.NotNull;
-import org.joml.Vector3f;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 
 public final class OfferingOfTheDeep extends JavaPlugin implements Listener {
 
     private NamespacedKey pedestalKey;
-    private NamespacedKey stateKey;
     private NamespacedKey priceKey;
     private NamespacedKey currencyKey;
-    private NamespacedKey itemKey;
+    private NamespacedKey storageKey;
+    private NamespacedKey itemDisplayKey;
+    private NamespacedKey indexKey;
 
-    private static final PersistentDataType<byte[], ItemStack> ITEM_STACK_TYPE = new PersistentDataType<>() {
+    private static final PersistentDataType<String, ItemStack[]> ITEM_ARRAY_TYPE = new PersistentDataType<>() {
+        @Override public @NotNull Class<String> getPrimitiveType() { return String.class; }
+        @Override public @NotNull Class<ItemStack[]> getComplexType() { return ItemStack[].class; }
         @Override
-        public @NotNull Class<byte[]> getPrimitiveType() { return byte[].class; }
-        @Override
-        public @NotNull Class<ItemStack> getComplexType() { return ItemStack.class; }
-        @Override
-        public byte @NotNull [] toPrimitive(@NotNull ItemStack complex, @NotNull PersistentDataAdapterContext context) {
-            return complex.serializeAsBytes();
+        public @NotNull String toPrimitive(ItemStack @NotNull [] complex, @NotNull PersistentDataAdapterContext context) {
+            YamlConfiguration config = new YamlConfiguration();
+            config.set("items", complex);
+            return config.saveToString();
         }
         @Override
-        public @NotNull ItemStack fromPrimitive(byte @NotNull [] primitive, @NotNull PersistentDataAdapterContext context) {
-            return ItemStack.deserializeBytes(primitive);
+        public ItemStack @NotNull [] fromPrimitive(@NotNull String primitive, @NotNull PersistentDataAdapterContext context) {
+            YamlConfiguration config = new YamlConfiguration();
+            try {
+                config.loadFromString(primitive);
+                List<?> list = config.getList("items");
+                if (list == null) return new ItemStack[0];
+                return list.toArray(new ItemStack[0]);
+            } catch (Exception e) { return new ItemStack[0]; }
         }
     };
 
     @Override
     public void onEnable() {
         this.pedestalKey = new NamespacedKey(this, "is_pedestal");
-        this.stateKey = new NamespacedKey(this, "pedestal_state");
-        this.priceKey = new NamespacedKey(this, "pedestal_price");
-        this.currencyKey = new NamespacedKey(this, "pedestal_currency");
-        this.itemKey = new NamespacedKey(this, "pedestal_item");
+        this.priceKey = new NamespacedKey(this, "price");
+        this.currencyKey = new NamespacedKey(this, "currency");
+        this.storageKey = new NamespacedKey(this, "storage");
+        this.itemDisplayKey = new NamespacedKey(this, "pedestal_item_display");
+        this.indexKey = new NamespacedKey(this, "display_index");
 
         getServer().getPluginManager().registerEvents(this, this);
         if (getCommand("givepedestal") != null) {
             Objects.requireNonNull(getCommand("givepedestal")).setExecutor(this);
         }
+
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            for (World world : Bukkit.getWorlds()) {
+                for (TextDisplay td : world.getEntitiesByClass(TextDisplay.class)) {
+                    if (td.getPersistentDataContainer().has(pedestalKey, PersistentDataType.BYTE)) {
+                        ItemStack[] items = td.getPersistentDataContainer().get(storageKey, ITEM_ARRAY_TYPE);
+                        if (items != null && items.length > 0) {
+                            int nextIdx = td.getPersistentDataContainer().getOrDefault(indexKey, PersistentDataType.INTEGER, 0);
+                            updatePedestalVisuals(td.getLocation().subtract(0.5, 1.2, 0.5), items, nextIdx);
+                            td.getPersistentDataContainer().set(indexKey, PersistentDataType.INTEGER, nextIdx + 1);
+                        }
+                    }
+                }
+            }
+        }, 0L, 100L);
     }
 
     @Override
     public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, @NotNull String[] args) {
-        if (!(sender instanceof Player player)) return true;
-        if (!player.hasPermission("pedestal.admin")) return true;
-
+        if (!(sender instanceof Player player) || !player.hasPermission("pedestal.admin")) return true;
         ItemStack item = new ItemStack(Material.CHISELED_DEEPSLATE);
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
@@ -90,116 +112,160 @@ public final class OfferingOfTheDeep extends JavaPlugin implements Listener {
         ItemStack item = event.getItemInHand();
         if (!item.hasItemMeta() || !item.getItemMeta().getPersistentDataContainer().has(pedestalKey, PersistentDataType.BYTE)) return;
 
-        Block block = event.getBlock();
-        Location loc = block.getLocation().add(0.5, 1.3, 0.5);
-        TextDisplay display = (TextDisplay) block.getWorld().spawnEntity(loc, EntityType.TEXT_DISPLAY);
-
-        display.setBillboard(org.bukkit.entity.Display.Billboard.CENTER);
-        display.text(Component.text("Настройте пьедестал\n(Кликните предметом для продажи)", NamedTextColor.YELLOW));
-
-        Transformation transformation = display.getTransformation();
-        transformation.getScale().set(new Vector3f(1.0f, 1.0f, 1.0f));
-        display.setTransformation(transformation);
-
+        Location loc = event.getBlock().getLocation().add(0.5, 1.2, 0.5);
+        TextDisplay display = (TextDisplay) loc.getWorld().spawnEntity(loc, EntityType.TEXT_DISPLAY);
         display.getPersistentDataContainer().set(pedestalKey, PersistentDataType.BYTE, (byte) 1);
-        display.getPersistentDataContainer().set(stateKey, PersistentDataType.STRING, "WAITING_ITEM");
+        display.getPersistentDataContainer().set(storageKey, ITEM_ARRAY_TYPE, new ItemStack[0]);
+        display.setBillboard(Display.Billboard.CENTER);
+        updatePedestalVisuals(event.getBlock().getLocation(), new ItemStack[0], 0);
     }
 
     @EventHandler
     public void onInteract(PlayerInteractEvent event) {
-        if (event.getAction() != Action.RIGHT_CLICK_BLOCK) return;
-        if (event.getHand() != EquipmentSlot.HAND) return; // Игнорируем вторую руку
-
+        if (event.getAction() != Action.RIGHT_CLICK_BLOCK || event.getHand() != EquipmentSlot.HAND) return;
         Block block = event.getClickedBlock();
         if (block == null || block.getType() != Material.CHISELED_DEEPSLATE) return;
-
         TextDisplay display = findDisplay(block.getLocation());
         if (display == null) return;
-
-        event.setCancelled(true); // Отменяем стандартное действие сразу
-
+        event.setCancelled(true);
         Player player = event.getPlayer();
-        ItemStack hand = player.getInventory().getItemInMainHand();
-        String state = display.getPersistentDataContainer().getOrDefault(stateKey, PersistentDataType.STRING, "NONE");
+        if (player.isSneaking() && player.hasPermission("pedestal.admin")) {
+            openAdminGui(player, display);
+        } else {
+            openCustomerGui(player, display);
+        }
+    }
 
-        switch (state) {
-            case "WAITING_ITEM" -> {
-                if (hand.getType().isAir()) return;
+    private void openAdminGui(Player player, TextDisplay display) {
+        Inventory inv = Bukkit.createInventory(null, 27, Component.text("Настройка Пьедестала"));
+        ItemStack[] savedItems = display.getPersistentDataContainer().get(storageKey, ITEM_ARRAY_TYPE);
+        if (savedItems != null) inv.setContents(savedItems);
+        player.openInventory(inv);
+        player.setMetadata("pedestal_id", new org.bukkit.metadata.FixedMetadataValue(this, display.getUniqueId().toString()));
+    }
 
-                ItemStack saleStack = hand.clone();
-                saleStack.setAmount(1);
-                display.getPersistentDataContainer().set(itemKey, ITEM_STACK_TYPE, saleStack);
-                display.getPersistentDataContainer().set(stateKey, PersistentDataType.STRING, "WAITING_PRICE");
-
-                display.text(Component.text("Предмет: ", NamedTextColor.GRAY)
-                        .append(Component.translatable(saleStack.translationKey(), NamedTextColor.AQUA))
-                        .append(Component.text("\nКликните Золотом или Алмазом\n(Количество в руке станет ценой)", NamedTextColor.GOLD)));
-
-                player.playSound(player.getLocation(), Sound.BLOCK_ANVIL_USE, 1f, 1.2f);
+    private void openCustomerGui(Player player, TextDisplay display) {
+        Inventory inv = Bukkit.createInventory(null, 27, Component.text("Магазин Глубин"));
+        ItemStack[] items = display.getPersistentDataContainer().get(storageKey, ITEM_ARRAY_TYPE);
+        if (items != null) {
+            for (ItemStack item : items) {
+                if (item == null || item.getType().isAir()) continue;
+                ItemStack icon = item.clone();
+                ItemMeta meta = icon.getItemMeta();
+                if (meta == null) continue;
+                int price = meta.getPersistentDataContainer().getOrDefault(priceKey, PersistentDataType.INTEGER, 0);
+                String curr = meta.getPersistentDataContainer().getOrDefault(currencyKey, PersistentDataType.STRING, "DIAMOND");
+                List<Component> lore = meta.hasLore() ? meta.lore() : new ArrayList<>();
+                if (lore == null) lore = new ArrayList<>();
+                lore.add(Component.text("----------------", NamedTextColor.DARK_GRAY));
+                lore.add(Component.text("Цена: ", NamedTextColor.YELLOW)
+                        .append(Component.text(price + " " + curr.replace("_", " "), NamedTextColor.GOLD)));
+                meta.lore(lore);
+                icon.setItemMeta(meta);
+                inv.addItem(icon);
             }
-            case "WAITING_PRICE" -> {
-                if (hand.getType() != Material.GOLD_INGOT && hand.getType() != Material.DIAMOND) return;
+        }
+        player.openInventory(inv);
+    }
 
-                int amountInHand = hand.getAmount();
-                display.getPersistentDataContainer().set(priceKey, PersistentDataType.INTEGER, amountInHand);
-                display.getPersistentDataContainer().set(currencyKey, PersistentDataType.STRING, hand.getType().name());
-                display.getPersistentDataContainer().set(stateKey, PersistentDataType.STRING, "ACTIVE");
-
-                updatePedestalText(display);
-                player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1f, 1f);
-            }
-            case "ACTIVE" -> {
-                ItemStack saleItem = display.getPersistentDataContainer().get(itemKey, ITEM_STACK_TYPE);
-                Integer price = display.getPersistentDataContainer().get(priceKey, PersistentDataType.INTEGER);
-                String currencyStr = display.getPersistentDataContainer().get(currencyKey, PersistentDataType.STRING);
-
-                if (saleItem == null || price == null || currencyStr == null) return;
-                Material currencyMat = Material.valueOf(currencyStr);
-
-                if (player.getInventory().containsAtLeast(new ItemStack(currencyMat), price)) {
-                    player.getInventory().removeItem(new ItemStack(currencyMat, price));
-                    player.getInventory().addItem(saleItem.clone());
-                    player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_YES, 1f, 1f);
-                } else {
-                    player.sendMessage(Component.text("Недостаточно средств!", NamedTextColor.RED));
-                    player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 1f, 1f);
-                }
-            }
+    @EventHandler
+    public void onInventoryClose(InventoryCloseEvent event) {
+        if (!event.getPlayer().hasMetadata("pedestal_id")) return;
+        String uuidStr = event.getPlayer().getMetadata("pedestal_id").get(0).asString();
+        event.getPlayer().removeMetadata("pedestal_id", this);
+        Entity entity = Bukkit.getEntity(UUID.fromString(uuidStr));
+        if (entity instanceof TextDisplay display) {
+            ItemStack[] contents = event.getInventory().getContents();
+            display.getPersistentDataContainer().set(storageKey, ITEM_ARRAY_TYPE, contents);
+            updatePedestalVisuals(display.getLocation().subtract(0.5, 1.2, 0.5), contents, 0);
+            event.getPlayer().sendMessage(Component.text("Сохранено!", NamedTextColor.GREEN));
         }
     }
 
     @EventHandler
-    public void onBreak(BlockBreakEvent event) {
-        if (event.getBlock().getType() != Material.CHISELED_DEEPSLATE) return;
-        TextDisplay display = findDisplay(event.getBlock().getLocation());
-        if (display != null) {
-            display.remove();
+    public void onInventoryClick(InventoryClickEvent event) {
+        String title = PlainTextComponentSerializer.plainText().serialize(event.getView().title());
+        Player player = (Player) event.getWhoClicked();
+        if (title.equals("Магазин Глубин")) {
+            event.setCancelled(true);
+            ItemStack clicked = event.getCurrentItem();
+            if (clicked == null || clicked.getType().isAir()) return;
+            ItemMeta meta = clicked.getItemMeta();
+            int price = meta.getPersistentDataContainer().getOrDefault(priceKey, PersistentDataType.INTEGER, 0);
+            Material curr = Material.valueOf(meta.getPersistentDataContainer().getOrDefault(currencyKey, PersistentDataType.STRING, "DIAMOND"));
+            if (player.getInventory().containsAtLeast(new ItemStack(curr), price)) {
+                player.getInventory().removeItem(new ItemStack(curr, price));
+                ItemStack res = clicked.clone();
+                ItemMeta rM = res.getItemMeta();
+                List<Component> l = rM.lore();
+                if (l != null && l.size() >= 2) { l.removeLast(); l.removeLast(); }
+                rM.lore(l);
+                res.setItemMeta(rM);
+                player.getInventory().addItem(res);
+                player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_YES, 1f, 1f);
+            } else { player.sendMessage(Component.text("Недостаточно: " + curr.name(), NamedTextColor.RED)); }
+        } else if (title.equals("Настройка Пьедестала")) {
+            ItemStack cursor = event.getCursor();
+            ItemStack clicked = event.getCurrentItem();
+            if (cursor != null && !cursor.getType().isAir() && clicked != null && !clicked.getType().isAir()) {
+                ItemMeta m = clicked.getItemMeta();
+                m.getPersistentDataContainer().set(priceKey, PersistentDataType.INTEGER, cursor.getAmount());
+                m.getPersistentDataContainer().set(currencyKey, PersistentDataType.STRING, cursor.getType().name());
+                clicked.setItemMeta(m);
+                player.sendMessage(Component.text("Цена: " + cursor.getAmount() + " " + cursor.getType().name(), NamedTextColor.GREEN));
+                event.setCancelled(true);
+            }
         }
     }
 
-    private TextDisplay findDisplay(Location blockLoc) {
-        Location checkLoc = blockLoc.clone().add(0.5, 1.3, 0.5);
-        for (Entity entity : checkLoc.getWorld().getNearbyEntities(checkLoc, 0.5, 0.5, 0.5)) {
-            if (entity instanceof TextDisplay display && display.getPersistentDataContainer().has(pedestalKey, PersistentDataType.BYTE)) {
-                return display;
-            }
+    private void updatePedestalVisuals(Location blockLoc, ItemStack[] items, int index) {
+        List<ItemStack> validItems = new ArrayList<>();
+        if (items != null) for (ItemStack is : items) if (is != null && !is.getType().isAir()) validItems.add(is);
+
+        Location textLoc = blockLoc.clone().add(0.5, 1.2, 0.5);
+        Location itemLoc = blockLoc.clone().add(0.5, 1.7, 0.5);
+        TextDisplay td = findEntity(textLoc, TextDisplay.class, pedestalKey);
+        ItemDisplay id = findEntity(itemLoc, ItemDisplay.class, itemDisplayKey);
+
+        if (validItems.isEmpty()) {
+            if (td != null) td.text(Component.text("Пусто", NamedTextColor.GRAY));
+            if (id != null) id.remove();
+            return;
         }
+
+        ItemStack show = validItems.get(index % validItems.size());
+        ItemMeta m = show.getItemMeta();
+        int p = m.getPersistentDataContainer().getOrDefault(priceKey, PersistentDataType.INTEGER, 0);
+        String c = m.getPersistentDataContainer().getOrDefault(currencyKey, PersistentDataType.STRING, "DIAMOND");
+
+        if (td != null) {
+            td.text(Component.text(p + " ", NamedTextColor.YELLOW, TextDecoration.BOLD)
+                    .append(Component.text(c.replace("_", " "), NamedTextColor.GOLD))
+                    .append(Component.text("\n" + PlainTextComponentSerializer.plainText().serialize(m.hasDisplayName() ? m.displayName() : Component.translatable(show.translationKey())), NamedTextColor.WHITE)));
+        }
+
+        if (id == null) {
+            id = (ItemDisplay) blockLoc.getWorld().spawnEntity(itemLoc, EntityType.ITEM_DISPLAY);
+            id.getPersistentDataContainer().set(itemDisplayKey, PersistentDataType.BYTE, (byte) 1);
+            id.setBillboard(Display.Billboard.CENTER);
+        }
+        id.setItemStack(show);
+        Transformation t = id.getTransformation();
+        t.getScale().set(0.6f, 0.6f, 0.6f);
+        id.setTransformation(t);
+    }
+
+    private <T extends Entity> T findEntity(Location l, Class<T> c, NamespacedKey k) {
+        for (Entity e : l.getWorld().getNearbyEntities(l, 0.6, 2.0, 0.6)) if (c.isInstance(e) && e.getPersistentDataContainer().has(k, PersistentDataType.BYTE)) return c.cast(e);
         return null;
     }
 
-    private void updatePedestalText(TextDisplay display) {
-        ItemStack item = display.getPersistentDataContainer().get(itemKey, ITEM_STACK_TYPE);
-        Integer price = display.getPersistentDataContainer().get(priceKey, PersistentDataType.INTEGER);
-        String currency = display.getPersistentDataContainer().get(currencyKey, PersistentDataType.STRING);
+    private TextDisplay findDisplay(Location b) { return findEntity(b.clone().add(0.5, 1.2, 0.5), TextDisplay.class, pedestalKey); }
 
-        if (item == null || price == null || currency == null) return;
-
-        NamedTextColor color = currency.equals("DIAMOND") ? NamedTextColor.AQUA : NamedTextColor.GOLD;
-        String currencyName = currency.equals("DIAMOND") ? "Алмазов" : "Золота";
-
-        display.text(Component.text("Торговая точка\n", NamedTextColor.DARK_GRAY)
-                .append(Component.translatable(item.translationKey(), NamedTextColor.WHITE))
-                .append(Component.text("\nЦена: ", NamedTextColor.YELLOW))
-                .append(Component.text(price + " " + currencyName, color)));
+    @EventHandler
+    public void onBreak(BlockBreakEvent event) {
+        if (event.getBlock().getType() != Material.CHISELED_DEEPSLATE) return;
+        Location l = event.getBlock().getLocation().add(0.5, 1.5, 0.5);
+        for (Entity e : l.getWorld().getNearbyEntities(l, 0.8, 2.0, 0.8)) if (e.getPersistentDataContainer().has(pedestalKey, PersistentDataType.BYTE) || e.getPersistentDataContainer().has(itemDisplayKey, PersistentDataType.BYTE)) e.remove();
     }
 }
